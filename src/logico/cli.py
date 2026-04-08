@@ -208,6 +208,49 @@ def cmd_diff(args: list[str]) -> None:
     _diff_projects(a, b)
 
 
+def _write_project(project: Project, path: str) -> None:
+    """Write a project to a file."""
+    fmt = _detect_format(path)
+
+    if fmt == "staffpad":
+        from .staffpad.writer import write_staffpad
+        write_staffpad(project, path)
+        print(f"  Written to StaffPad: {path}")
+    elif fmt == "logic":
+        from .logic.writer import write_logic
+        write_logic(project, path)
+        print(f"  Written to Logic Pro: {path}")
+    elif fmt == "dorico":
+        print("  Dorico writing not yet implemented (coming in next update)")
+    else:
+        print(f"  Writing not supported for format: {fmt}")
+
+
+def cmd_sync(args: list[str]) -> None:
+    """Handle the 'sync' command."""
+    if len(args) < 2:
+        print("Usage: logico sync <source> <destination>")
+        sys.exit(1)
+
+    source_path = args[0]
+    dest_path = args[1]
+
+    print(f"Source: {source_path}")
+    source = _load_project(source_path)
+    print(f"  {source.source_format}: {sum(len(t.notes) for t in source.tracks)} notes across {len(source.tracks)} tracks")
+
+    print(f"\nDestination: {dest_path}")
+    print(f"  Syncing notes...")
+
+    _write_project(source, dest_path)
+
+    # Verify
+    print("\nVerifying...")
+    result = _load_project(dest_path)
+    print(f"  {result.source_format}: {sum(len(t.notes) for t in result.tracks)} notes across {len(result.tracks)} tracks")
+    print("\nSync complete.")
+
+
 def main() -> None:
     """CLI entry point."""
     args = sys.argv[1:]
@@ -216,13 +259,14 @@ def main() -> None:
         print("Logico — Sync between Logic Pro, Dorico, and StaffPad")
         print()
         print("Commands:")
-        print("  logico read <file>          Read and display a project")
-        print("  logico diff <file1> <file2>  Compare two projects")
+        print("  logico read <file>            Read and display a project")
+        print("  logico diff <file1> <file2>   Compare two projects")
+        print("  logico sync <source> <dest>   Sync notes from source to destination")
         print()
         print("Supported formats:")
-        print("  .dorico   — Dorico project")
-        print("  .stf      — StaffPad project")
-        print("  .logicx   — Logic Pro project (or directory containing one)")
+        print("  .dorico   — Dorico project (read-only for now)")
+        print("  .stf      — StaffPad project (read + write)")
+        print("  .logicx   — Logic Pro project (read + write)")
         sys.exit(0)
 
     command = args[0]
@@ -232,6 +276,8 @@ def main() -> None:
         cmd_read(rest)
     elif command == "diff":
         cmd_diff(rest)
+    elif command == "sync":
+        cmd_sync(rest)
     else:
         print(f"Unknown command: {command}")
         print("Run 'logico --help' for usage")

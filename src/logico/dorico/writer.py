@@ -19,13 +19,14 @@ preserved byte-for-byte.
 
 from __future__ import annotations
 
+import copy
 import io
 import shutil
 import zipfile
-from dataclasses import dataclass
+from fractions import Fraction
 from pathlib import Path
 
-from ..model import KeySignatureEvent, Note, Project, TimeSignatureEvent
+from ..model import KeySignatureEvent, Note, Project, TimeSignatureEvent, midi_to_diatonic
 from .dtn import DtnEntity, DtnFile, DtnKV, parse_dtn, serialize_dtn
 from .extractor import _ACCIDENTAL_TO_ALT, _NOTE_NAME_TO_STEP, _NOTE_TO_FIFTHS
 from .parser import parse_dorico
@@ -226,11 +227,29 @@ def _update_key_signature(
             _set_kv(inner_root, dtn, "accidentalID", accidental_id)
 
 
+def _ticks_to_qn_str(ticks: int, ppq: int) -> str:
+    """Convert a tick position to a Dorico rational quarter-note string.
+
+    Examples at PPQ=960:
+      0       → "0"
+      960     → "1"
+      480     → "1/2"
+      27360   → "57/2"
+    """
+    frac = Fraction(ticks, ppq)
+    if frac.denominator == 1:
+        return str(frac.numerator)
+    return f"{frac.numerator}/{frac.denominator}"
+
+
 def _try_write_notes(flow: DtnEntity, dtn: DtnFile, project: Project) -> None:
     """Write note events into voice stream blocks.
 
-    Currently raises NotImplementedError if the file has no existing note
-    events to use as a structural template.
+    Strategy:
+    1. Find any existing NoteEventDefinition to use as a structural template.
+    2. Clear the events array of the first voice block that has events.
+    3. Clone the template for each note, update pitch/position/duration.
+    4. For files with no existing notes, raise NotImplementedError.
     """
     k, v = dtn.keys, dtn.values
 
@@ -250,17 +269,19 @@ def _try_write_notes(flow: DtnEntity, dtn: DtnFile, project: Project) -> None:
         if bkvs.get("parentEventStreamType") == "kVoiceStream":
             voice_blocks.append(block)
 
-    # Check whether ANY voice block has existing events to template from
-    template = None
+    # Find template note event and the voice block that contains it
+    template: DtnEntity | None = None
+    target_block: DtnEntity | None = None
     for vb in voice_blocks:
         events = vb.get_entity("events", k)
         if events:
             for c in events.children:
                 if isinstance(c, DtnEntity) and "Note" in c.key(k):
                     template = c
+                    target_block = vb
                     break
-            if template is not None:
-                break
+        if template is not None:
+            break
 
     if template is None:
         raise NotImplementedError(
@@ -271,17 +292,65 @@ def _try_write_notes(flow: DtnEntity, dtn: DtnFile, project: Project) -> None:
             "manually, save, then re-run sync."
         )
 
-    # Once we have a template, the next step would be:
-    #   1. Clear existing events in each voice block
-    #   2. Build new entities by cloning the template structure
-    #   3. Update position/duration/pitch fields
-    #   4. Replace the (null) child with a fresh `events` array entity
-    # This requires careful handling of the value table (new strings) and
-    # child key lists. To be implemented in a follow-up.
-    raise NotImplementedError(
-        "Note writing is not yet implemented even with a template. "
-        "Tempo, time signature, and key signature writes are working."
-    )
+    # Detect pitch encoding from the template: modern = direct KV, legacy = nested entity
+    uses_modern_pitch = template.get_kv("pitch", k, v) is not None
+
+    # Key signature fifths for diatonic spelling (legacy format)
+    fifths = project.key_signatures[0].fifths if project.key_signatures else 0
+
+    # Map project tracks → voice blocks by index.
+    # Tracks beyond the number of voice blocks are merged into the last block.
+    # Voice blocks with no corresponding source track are cleared (emptied).
+    for block_idx, vb in enumerate(voice_blocks):
+        vb_events = vb.get_entity("events", k)
+        if vb_events is None:
+            continue  # empty voice block with no events entity — skip
+
+        # Clear existing events
+        vb_events.children.clear()
+        vb_events.child_key_list.clear()
+        vb_events.null_child_data.clear()
+
+        # Collect notes for this block: track[block_idx], or nothing if out of range
+        if block_idx < len(project.tracks):
+            track_notes = sorted(project.tracks[block_idx].notes, key=lambda n: n.position)
+        else:
+            track_notes = []
+
+        for note in track_notes:
+            note_entity = copy.deepcopy(template)
+            _update_note_entity(note_entity, dtn, note, project.ppq, uses_modern_pitch, fifths)
+            vb_events.children.append(note_entity)
+            vb_events.child_key_list.append(0)
+
+
+def _update_note_entity(
+    entity: DtnEntity,
+    dtn: DtnFile,
+    note: Note,
+    ppq: int,
+    uses_modern_pitch: bool,
+    fifths: int,
+) -> None:
+    """Update pitch, position, duration, velocity on a cloned NoteEventDefinition."""
+    pos_str = _ticks_to_qn_str(note.position, ppq)
+    dur_str = _ticks_to_qn_str(note.duration, ppq)
+
+    _set_kv(entity, dtn, "position", pos_str)
+    _set_kv(entity, dtn, "duration", dur_str)
+    _set_kv(entity, dtn, "velocity", str(note.velocity))
+
+    if uses_modern_pitch:
+        _set_kv(entity, dtn, "pitch", str(note.pitch))
+    else:
+        # Legacy format: nested pitch entity with diatonicStep / chromaticAlteration / octave
+        k = dtn.keys
+        pitch_entity = entity.get_entity("pitch", k)
+        if pitch_entity:
+            step, alteration, octave = midi_to_diatonic(note.pitch, fifths)
+            _set_kv(pitch_entity, dtn, "diatonicStep", str(step))
+            _set_kv(pitch_entity, dtn, "chromaticAlteration", str(alteration))
+            _set_kv(pitch_entity, dtn, "octave", str(octave))
 
 
 def _set_kv(entity: DtnEntity, dtn: DtnFile, key_name: str, new_value: str) -> None:

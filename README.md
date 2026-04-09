@@ -42,9 +42,11 @@ Show differences between two projects (any format combination):
 ```bash
 logico diff mysong.dorico mysong.stf
 logico diff MyProject.logicx mysong.stf
+logico diff mysong.dorico @2          # current state vs snapshot 2
+logico diff mysong.dorico @1 @3       # snapshot 1 vs snapshot 3
 ```
 
-The diff highlights tempo/signature mismatches and per-track note differences.
+The diff highlights tempo/signature mismatches and per-track note differences (added, removed, changed).
 
 ### Sync from one project to another
 
@@ -55,12 +57,50 @@ logico sync source.stf dest.logicx
 logico sync MyProject.logicx mysong.stf
 ```
 
-Tracks are matched by name. Only matching tracks in the destination are updated; everything else (mixer, plugins, video, unrelated tracks) is preserved.
+Tracks are matched by name, then by fuzzy instrument alias (e.g. `"Violino."` ↔ `"violin"`), then by explicit mapping in `logico.toml`. Every successful sync automatically saves a snapshot of the destination.
 
 > **Important — destination file behavior:** sync **modifies the destination file in place** after creating a backup. The source file is never touched.
 > - StaffPad: backup at `<dest>.stf.backup`
 > - Logic Pro: backup at `<DestName>.backup.logicx` next to the original
 > - Sources are read-only
+
+### Version history
+
+Every sync saves a snapshot automatically. You can also inspect and restore history manually:
+
+```bash
+logico log mysong.dorico              # list all snapshots with timestamps and change summaries
+logico diff mysong.dorico @2          # diff current state vs snapshot 2
+logico diff mysong.dorico @1 @3       # diff snapshot 1 vs snapshot 3
+logico revert mysong.dorico @3        # restore snapshot 3 (saves current state first)
+```
+
+Snapshots are stored in `.logico/<filename>/` next to the project file as plain JSON — human-readable and easy to back up.
+
+### Auto-sync on save
+
+```bash
+logico watch source.dorico dest.logicx
+```
+
+Monitors the source file and syncs to the destination automatically whenever you save. Uses a 1-second debounce to handle rapid saves and ignores its own writes to prevent sync loops.
+
+### Instrument mapping
+
+Create a `logico.toml` in your project directory to map track names across formats:
+
+```toml
+[[tracks]]
+logic    = "Inst 1"
+dorico   = "Violino."
+staffpad = "Violin"
+
+[[tracks]]
+logic    = "Piano"
+dorico   = "Pianoforte."
+```
+
+Common instrument name variants (e.g. `violin` / `Violino.` / `vln`) are resolved automatically without any config.
 
 ## Supported formats
 
@@ -68,11 +108,9 @@ Tracks are matched by name. Only matching tracks in the destination are updated;
 |-----------------|-----------|------|--------------------|-------|
 | Logic Pro       | `.logicx` | Yes  | Yes                | Modifies the binary `ProjectData` in place |
 | StaffPad        | `.stf`    | Yes  | Yes                | SQLite-backed, fastest format to work with |
-| Dorico          | `.dorico` | Yes  | Partial†           | Tempo/time-signature/key-signature only; note writing pending |
+| Dorico          | `.dorico` | Yes  | Yes                | Clones existing `NoteEventDefinition` as template; both legacy and modern encodings |
 
 Dorico read support covers both the **legacy binary encoding** (Dorico ≤ 4.x, opcodes `0xFC/FD/FE/FF`) and the **modern encoding** (Dorico 5.x+, opcodes `0x1C/1D/1E/1F`) — auto-detected per file. Both formats round-trip byte-identically.
-
-† Note *writing* into Dorico is still pending. The DTN binary parser/serializer is complete, and tempo/time-signature/key-signature writes are working. Note writing requires cloning the `NoteEventDefinition` entity structure from an existing note — the structure is now fully understood from a real score, but the cloning logic hasn't been wired up yet.
 
 ## Status
 
@@ -100,7 +138,7 @@ Verified against real project files:
 - **Logic Pro writer** — Done. Round-trip verified across all 3 notes.
 - **Dorico writer** — Done. Note writing implemented via template cloning. Round-trip verified: 1056-note Salut d'Amour round-trip = 0 mismatches. Both modern (Dorico 5+, direct MIDI pitch KV) and legacy (Dorico ≤4, diatonic entity) pitch encodings supported.
 
-### Phase 3 — Version history & diff/merge engine (planned)
+### Phase 3 — Version history & diff/merge engine (complete)
 
 Every sync creates a commit in a `.logico/` directory alongside your projects — a lightweight version history for your musical data, independent of what Logic/Dorico/StaffPad do internally.
 
@@ -115,7 +153,7 @@ logico revert mysong.dorico @3     # restore version 3 (backs up current first)
 - **Three-way merge** — when both source and destination changed since the last sync, merge changes automatically; flag conflicts (same note position, different pitch) for manual resolution
 - **Revert** — restore any past snapshot back into the project file, with an automatic backup of the current state
 
-### Phase 4 — File watcher daemon (planned)
+### Phase 4 — File watcher daemon (complete)
 
 ```bash
 logico watch source.dorico dest.logicx   # auto-sync on every save
@@ -123,7 +161,7 @@ logico watch source.dorico dest.logicx   # auto-sync on every save
 
 Uses `watchdog` (already a dependency) to monitor both files. On save, diffs against the last snapshot and applies only the changed notes — not a full rewrite. Debounces rapid saves and detects its own writes to prevent sync loops.
 
-### Phase 5 — Extended musical data (planned)
+### Phase 5 — Extended musical data (partial)
 
 - **Dynamics** — sync `pp/p/mp/mf/f/ff` markings and hairpins (crescendo/diminuendo); map Dorico dynamic entities ↔ Logic MIDI CC1/CC11
 - **Articulations** — staccato, accent, tenuto, marcato; map Dorico articulation IDs ↔ Logic note flags
@@ -215,12 +253,14 @@ Musical hierarchy: `kScore → flows → blocks → events`. Notes live in `kVoi
 ```
 src/logico/
 ├── model.py              Common music data model
-├── cli.py                CLI entry point
+├── cli.py                CLI entry point (read, diff, sync, log, revert, watch)
+├── mapping.py            Instrument/track name mapping + fuzzy alias table
+├── watcher.py            File watcher daemon (Phase 4)
 ├── dorico/
 │   ├── dtn.py            DTN binary parser/serializer (legacy + modern opcodes)
 │   ├── parser.py         .dorico ZIP → DtnFile
 │   ├── extractor.py      DtnFile → Project (both format variants)
-│   └── writer.py         Project → .dorico (tempo/time-sig/key-sig; notes pending)
+│   └── writer.py         Project → .dorico (full read+write)
 ├── staffpad/
 │   ├── parser.py         .stf SQLite parser
 │   ├── extractor.py      StfProject → Project
@@ -229,7 +269,9 @@ src/logico/
 │   ├── parser.py         .logicx binary parser
 │   ├── extractor.py      LogicProject → Project
 │   └── writer.py         Project → .logicx
-└── sync/                 (placeholder for Phase 3)
+└── sync/
+    ├── snapshot.py       JSON snapshot save/load (Phase 3)
+    └── diff.py           Note/tempo/sig diff engine (Phase 3)
 ```
 
 ## Safety notes

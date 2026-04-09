@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from fractions import Fraction
+
 from ..dorico.dtn import DtnEntity, DtnKV, DtnFile
 from ..dorico.parser import DoricoProject
 from ..model import (
@@ -16,6 +18,7 @@ from ..model import (
     TempoEvent,
     TimeSignatureEvent,
     Track,
+    DEFAULT_PPQ,
     diatonic_to_midi,
 )
 
@@ -36,6 +39,20 @@ _ACCIDENTAL_TO_ALT = {
     "accidental.12et.western.doublesharp": 2,
     "accidental.12et.western.doubleflat": -2,
 }
+
+
+def _parse_position(pos_str: str, ppq: int) -> int:
+    """Convert a Dorico position string (quarter notes, possibly rational) to ticks.
+
+    Dorico stores positions as quarter-note counts, potentially as fractions:
+      '4'    → 4 * ppq ticks
+      '57/2' → 28.5 * ppq ticks
+    """
+    try:
+        frac = Fraction(pos_str)
+        return int(frac * ppq)
+    except (ValueError, ZeroDivisionError):
+        return 0
 
 
 def extract_project(dorico: DoricoProject) -> Project:
@@ -77,7 +94,7 @@ def _extract_flow(flow: DtnEntity, s: DtnFile, project: Project) -> None:
     """Extract tempo, time sig, key sig, and notes from a flow."""
     k, v = s.keys, s.values
 
-    # Extract element tables (time sig, key sig)
+    # Extract element tables (time sig, key sig) — present in both old and new format
     et = flow.get_entity("elementTables", k)
     if et:
         et_arr = et.get_entity("array", k)
@@ -91,7 +108,7 @@ def _extract_flow(flow: DtnEntity, s: DtnFile, project: Project) -> None:
                 elif name == "TonalityDivisionElementTableDefinition":
                     _extract_key_signatures(child, s, project)
 
-    # Extract blocks for note data
+    # Extract blocks for note data and tempo
     blocks = flow.get_entity("blocks", k)
     if blocks:
         blocks_arr = blocks.get_entity("array", k)
@@ -103,6 +120,8 @@ def _extract_flow(flow: DtnEntity, s: DtnFile, project: Project) -> None:
                 stream_type = bkvs.get("parentEventStreamType", "")
                 if stream_type == "kVoiceStream":
                     _extract_voice_events(block, s, project)
+                elif stream_type == "kGlobalTimebaseStream":
+                    _extract_tempo_events(block, s, project)
 
     # Extract flow player/instrument mapping for track creation
     fp = flow.get_entity("flowPlayers", k)
@@ -218,13 +237,58 @@ def _extract_key_signatures(
             )
 
 
+def _extract_tempo_events(block: DtnEntity, s: DtnFile, project: Project) -> None:
+    """Extract tempo events from a kGlobalTimebaseStream block.
+
+    Handles ImmediateTempoChangeEventDefinition (modern Dorico 5+ format).
+    """
+    k, v = s.keys, s.values
+
+    events = block.get_entity("events", k)
+    if not events:
+        return
+
+    for ev in events.children:
+        if not isinstance(ev, DtnEntity):
+            continue
+        ev_name = ev.key(k)
+        if ev_name != "ImmediateTempoChangeEventDefinition":
+            continue
+
+        ev_kvs = ev.get_all_kvs(k, v)
+        pos_str = ev_kvs.get("position", "0")
+        position = _parse_position(pos_str, project.ppq)
+
+        # Tempo data is nested: data > absoluteTempo > tempoValue (µs per quarter)
+        data_entity = ev.get_entity("data", k)
+        if not data_entity:
+            continue
+
+        abs_tempo = data_entity.get_entity("absoluteTempo", k)
+        if not abs_tempo:
+            continue
+
+        tempo_kvs = abs_tempo.get_all_kvs(k, v)
+        tempo_us = tempo_kvs.get("tempoValue", "")
+        if not tempo_us:
+            continue
+
+        try:
+            us_per_beat = int(tempo_us)
+            bpm = round(60_000_000 / us_per_beat, 2) if us_per_beat else 120.0
+        except (ValueError, ZeroDivisionError):
+            continue
+
+        project.tempo_events.append(TempoEvent(position=position, bpm=bpm))
+
+
 def _extract_voice_events(
     block: DtnEntity, s: DtnFile, project: Project
 ) -> None:
     """Extract note events from a voice stream block."""
     k, v = s.keys, s.values
 
-    # In Dorico, the block has an `events` array directly (it IS an array entity).
+    # In Dorico, the block has an `events` array entity.
     # An empty voice block has a (null) child instead.
     events = block.get_entity("events", k)
     if not events:
@@ -238,8 +302,7 @@ def _extract_voice_events(
         ev_kvs = ev.get_all_kvs(k, v)
         ev_name = ev.key(k)
 
-        # Note events in Dorico are typically NoteEventDefinition or similar
-        if "Note" in ev_name or "note" in ev_name:
+        if ev_name in ("NoteEventDefinition", "GraceNoteEventDefinition"):
             _extract_note_event(ev, ev_kvs, s, project)
 
 
@@ -249,23 +312,44 @@ def _extract_note_event(
     s: DtnFile,
     project: Project,
 ) -> None:
-    """Extract a single note event."""
+    """Extract a single note event.
+
+    Supports two pitch formats:
+    - Modern (Dorico 5+): NoteEventDefinition has a 'pitch' KV with MIDI pitch integer.
+    - Legacy: NoteEventDefinition has a 'pitch' entity with diatonicStep/chromaticAlteration/octave.
+    """
     k, v = s.keys, s.values
 
-    position = int(kvs.get("position", "0"))
-    duration = int(kvs.get("duration", "0"))
+    pos_str = kvs.get("position", "0")
+    dur_str = kvs.get("duration", "0")
+    position = _parse_position(pos_str, project.ppq)
+    duration = _parse_position(dur_str, project.ppq)
 
-    # Pitch data
-    pitch_entity = event.get_entity("pitch", k)
-    if not pitch_entity:
-        return
+    if duration == 0:
+        return  # skip zero-duration events (grace notes without duration, rests)
 
-    pitch_kvs = pitch_entity.get_all_kvs(k, v)
-    step = int(pitch_kvs.get("diatonicStep", "0"))
-    alteration = int(pitch_kvs.get("chromaticAlteration", "0"))
-    octave = int(pitch_kvs.get("octave", "4"))
+    # --- Pitch: modern format (direct MIDI pitch as KV string) ---
+    midi_pitch: int | None = None
+    pitch_str = kvs.get("pitch")
+    if pitch_str is not None:
+        try:
+            midi_pitch = int(pitch_str)
+        except ValueError:
+            pass
 
-    midi_pitch = diatonic_to_midi(step, alteration, octave)
+    # --- Pitch: legacy format (pitch entity with diatonic representation) ---
+    if midi_pitch is None:
+        pitch_entity = event.get_entity("pitch", k)
+        if pitch_entity:
+            pitch_kvs = pitch_entity.get_all_kvs(k, v)
+            step = int(pitch_kvs.get("diatonicStep", "0"))
+            alteration = int(pitch_kvs.get("chromaticAlteration", "0"))
+            octave = int(pitch_kvs.get("octave", "4"))
+            midi_pitch = diatonic_to_midi(step, alteration, octave)
+
+    if midi_pitch is None:
+        return  # can't determine pitch — skip
+
     velocity = int(kvs.get("velocity", "80"))
 
     note = Note(
@@ -273,9 +357,6 @@ def _extract_note_event(
         velocity=velocity,
         position=position,
         duration=duration,
-        diatonic_step=step,
-        chromatic_alteration=alteration,
-        octave=octave,
     )
 
     # Add to first track (or create one if needed)

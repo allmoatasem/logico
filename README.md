@@ -94,17 +94,50 @@ Verified against real project files:
 - `Salut d'Amour.logicx` (Logic Pro, MIDI from the Dorico score) — parses cleanly
 - `Code Noir.logicx` (Logic Pro, 4 tracks) — parses cleanly
 
-### Phase 2 — Writers (mostly done)
+### Phase 2 — Writers (complete)
 
 - **StaffPad writer** — Done. Round-trip verified across all 96 notes.
 - **Logic Pro writer** — Done. Round-trip verified across all 3 notes.
-- **Dorico writer** — Tempo/time signature/key signature writes done. The DTN binary serializer round-trips both a 2 MB Dorico 4.x file and a 1 MB Dorico 5.x file byte-identically. Note writing is the last piece — the `NoteEventDefinition` structure is now fully understood from a real score (Salut d'Amour); the cloning/insertion logic is still to be implemented.
+- **Dorico writer** — Done. Note writing implemented via template cloning. Round-trip verified: 1056-note Salut d'Amour round-trip = 0 mismatches. Both modern (Dorico 5+, direct MIDI pitch KV) and legacy (Dorico ≤4, diatonic entity) pitch encodings supported.
 
-### Future phases
+### Phase 3 — Version history & diff/merge engine (planned)
 
-- **Phase 3**: Diff & merge engine with three-way merge and conflict resolution
-- **Phase 4**: File watcher daemon (`logico watch`) for automatic sync on save
-- **Phase 5**: Extended musical data — dynamics, articulations, hairpins, instrument mapping
+Every sync creates a commit in a `.logico/` directory alongside your projects — a lightweight version history for your musical data, independent of what Logic/Dorico/StaffPad do internally.
+
+```bash
+logico log mysong.dorico           # show all past versions
+logico diff mysong.dorico @2       # diff current vs version 2
+logico revert mysong.dorico @3     # restore version 3 (backs up current first)
+```
+
+- **Snapshots** — each sync saves a canonical JSON snapshot of the Project model (`notes, tempo, time sig, key sig`) with a timestamp and hash
+- **Diff** — compare any two snapshots or a snapshot against the current file: added/removed/changed notes, tempo or signature changes
+- **Three-way merge** — when both source and destination changed since the last sync, merge changes automatically; flag conflicts (same note position, different pitch) for manual resolution
+- **Revert** — restore any past snapshot back into the project file, with an automatic backup of the current state
+
+### Phase 4 — File watcher daemon (planned)
+
+```bash
+logico watch source.dorico dest.logicx   # auto-sync on every save
+```
+
+Uses `watchdog` (already a dependency) to monitor both files. On save, diffs against the last snapshot and applies only the changed notes — not a full rewrite. Debounces rapid saves and detects its own writes to prevent sync loops.
+
+### Phase 5 — Extended musical data (planned)
+
+- **Dynamics** — sync `pp/p/mp/mf/f/ff` markings and hairpins (crescendo/diminuendo); map Dorico dynamic entities ↔ Logic MIDI CC1/CC11
+- **Articulations** — staccato, accent, tenuto, marcato; map Dorico articulation IDs ↔ Logic note flags
+- **Instrument mapping** — `logico.toml` config for matching tracks across formats by instrument family, not just exact name; fuzzy matching and alias tables
+
+### Phase 6 — Cross-platform desktop UI (planned)
+
+A native-feeling Electron app that wraps the Python CLI, targeting macOS, Windows, and Linux.
+
+- **Project panel** — open any `.logicx`, `.dorico`, or `.stf` file and see its tracks, notes, tempo, and key at a glance
+- **Sync view** — side-by-side diff of two projects with color-coded added/removed/changed notes before committing the sync
+- **Version timeline** — visual history of all past snapshots (Phase 3), click any point to preview or restore it
+- **Watch mode toggle** — enable/disable automatic sync on save with a single button
+- **Architecture**: Electron shell + Python sidecar process (spawned via `child_process`); the UI sends commands to the CLI via stdin/stdout or a local HTTP API, keeping all format logic in Python
 
 ## How it works
 

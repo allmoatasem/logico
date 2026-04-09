@@ -1,0 +1,194 @@
+/* ── Reset & base ── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg:        #181818;
+  --surface:   #242424;
+  --surface2:  #2e2e2e;
+  --border:    #3a3a3a;
+  --text:      #e8e8e8;
+  --text-dim:  #888;
+  --accent:    #7c6af7;
+  --accent-h:  #9b8dfb;
+  --green:     #4caf78;
+  --red:       #e05c5c;
+  --amber:     #e0a04a;
+  --radius:    8px;
+  --sidebar-w: 180px;
+}
+
+html, body, #root { height: 100%; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+       font-size: 13px; background: var(--bg); color: var(--text);
+       -webkit-font-smoothing: antialiased; overflow: hidden; }
+
+/* ── Layout ── */
+.app { display: flex; height: 100vh; }
+
+.sidebar {
+  width: var(--sidebar-w); flex-shrink: 0;
+  background: var(--surface); border-right: 1px solid var(--border);
+  display: flex; flex-direction: column;
+  padding-top: env(titlebar-area-height, 28px);
+}
+
+.sidebar-logo {
+  font-size: 17px; font-weight: 700; letter-spacing: -0.3px;
+  padding: 18px 20px 14px; color: var(--text);
+}
+.sidebar-logo span { color: var(--accent); }
+
+.sidebar-nav { display: flex; flex-direction: column; gap: 2px; padding: 0 8px; }
+
+.nav-item {
+  display: flex; align-items: center; gap: 10px;
+  padding: 9px 12px; border-radius: 6px; cursor: pointer;
+  color: var(--text-dim); font-size: 13px; font-weight: 500;
+  border: none; background: none; width: 100%; text-align: left;
+  transition: background 0.1s, color 0.1s;
+}
+.nav-item:hover { background: var(--surface2); color: var(--text); }
+.nav-item.active { background: rgba(124,106,247,0.15); color: var(--accent-h); }
+.nav-icon { font-size: 15px; width: 18px; text-align: center; }
+
+.main { flex: 1; overflow: hidden; display: flex; flex-direction: column; }
+
+/* ── Title bar drag region (macOS) ── */
+.titlebar { -webkit-app-region: drag; height: env(titlebar-area-height, 28px);
+            flex-shrink: 0; }
+.no-drag { -webkit-app-region: no-drag; }
+
+/* ── Panel ── */
+.panel { padding: 28px 32px; flex: 1; overflow-y: auto; }
+.panel-title { font-size: 18px; font-weight: 700; margin-bottom: 24px; }
+
+/* ── File picker row ── */
+.file-row { display: flex; flex-direction: column; gap: 6px; margin-bottom: 16px; }
+.file-label { font-size: 11px; font-weight: 600; text-transform: uppercase;
+              letter-spacing: 0.6px; color: var(--text-dim); }
+.file-input-row { display: flex; gap: 8px; }
+.file-path {
+  flex: 1; background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 8px 12px; color: var(--text);
+  font-size: 12px; font-family: 'SF Mono', 'Consolas', monospace;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  cursor: default;
+}
+.file-path.empty { color: var(--text-dim); }
+
+/* ── Buttons ── */
+.btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  padding: 8px 16px; border-radius: var(--radius);
+  font-size: 13px; font-weight: 600; cursor: pointer;
+  border: none; transition: opacity 0.15s, background 0.15s;
+}
+.btn:disabled { opacity: 0.4; cursor: default; }
+.btn-primary { background: var(--accent); color: #fff; }
+.btn-primary:not(:disabled):hover { background: var(--accent-h); }
+.btn-secondary { background: var(--surface2); color: var(--text); border: 1px solid var(--border); }
+.btn-secondary:not(:disabled):hover { border-color: var(--accent); }
+.btn-ghost { background: none; color: var(--text-dim); border: 1px solid var(--border); }
+.btn-ghost:not(:disabled):hover { color: var(--text); border-color: var(--text-dim); }
+.btn-danger { background: var(--red); color: #fff; }
+.btn-sm { padding: 5px 11px; font-size: 12px; }
+.btn-browse { padding: 8px 14px; background: var(--surface2);
+              color: var(--text-dim); border: 1px solid var(--border); }
+.btn-browse:hover { color: var(--text); border-color: var(--text-dim); }
+
+/* ── Result / status boxes ── */
+.result-box {
+  margin-top: 20px; padding: 16px 18px; border-radius: var(--radius);
+  border: 1px solid var(--border); background: var(--surface);
+}
+.result-box.success { border-color: var(--green); background: rgba(76,175,120,0.08); }
+.result-box.error   { border-color: var(--red);   background: rgba(224,92,92,0.08); }
+
+.status-dot {
+  display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+  margin-right: 8px; background: var(--text-dim);
+}
+.status-dot.green  { background: var(--green); box-shadow: 0 0 6px var(--green); }
+.status-dot.red    { background: var(--red); }
+.status-dot.amber  { background: var(--amber); }
+
+/* ── Divider ── */
+.divider { border: none; border-top: 1px solid var(--border); margin: 20px 0; }
+
+/* ── Snapshot list ── */
+.snapshot-list { display: flex; flex-direction: column; gap: 8px; }
+.snapshot-item {
+  display: flex; align-items: center; gap: 12px;
+  padding: 12px 14px; border-radius: var(--radius);
+  border: 1px solid var(--border); background: var(--surface);
+  cursor: pointer; transition: border-color 0.1s;
+}
+.snapshot-item:hover { border-color: var(--accent); }
+.snapshot-item.selected { border-color: var(--accent); background: rgba(124,106,247,0.08); }
+.snap-num { font-size: 11px; font-weight: 700; color: var(--accent);
+            min-width: 28px; font-family: monospace; }
+.snap-meta { flex: 1; }
+.snap-msg { font-weight: 600; margin-bottom: 2px; }
+.snap-ts  { font-size: 11px; color: var(--text-dim); }
+.snap-summary { font-size: 11px; color: var(--text-dim); margin-left: auto; }
+.snap-latest { font-size: 10px; padding: 2px 6px; border-radius: 4px;
+               background: rgba(124,106,247,0.2); color: var(--accent); font-weight: 700; }
+
+/* ── Diff view ── */
+.diff-section { margin-bottom: 16px; }
+.diff-section-title { font-size: 11px; font-weight: 700; text-transform: uppercase;
+                      letter-spacing: 0.6px; color: var(--text-dim); margin-bottom: 8px; }
+.diff-row {
+  display: flex; align-items: center; gap: 10px;
+  padding: 6px 10px; border-radius: 5px; font-family: 'SF Mono', 'Consolas', monospace;
+  font-size: 12px; margin-bottom: 4px;
+}
+.diff-added   { background: rgba(76,175,120,0.12); color: var(--green); }
+.diff-removed { background: rgba(224,92,92,0.12);  color: var(--red); }
+.diff-changed { background: rgba(224,160,74,0.12); color: var(--amber); }
+.diff-sign { font-weight: 900; width: 12px; }
+.diff-name { font-weight: 700; min-width: 32px; }
+.diff-pos  { color: var(--text-dim); }
+.diff-track{ color: var(--text-dim); font-size: 11px; margin-left: auto; }
+
+/* ── Watch toggle ── */
+.watch-status {
+  display: flex; align-items: center; gap: 10px;
+  padding: 14px 16px; border-radius: var(--radius);
+  border: 1px solid var(--border); background: var(--surface);
+  margin-top: 16px;
+}
+.watch-status.active { border-color: var(--green); background: rgba(76,175,120,0.07); }
+
+/* ── Loading spinner ── */
+@keyframes spin { to { transform: rotate(360deg); } }
+.spinner {
+  width: 16px; height: 16px; border: 2px solid var(--border);
+  border-top-color: var(--accent); border-radius: 50%;
+  animation: spin 0.7s linear infinite; display: inline-block;
+}
+
+/* ── Empty state ── */
+.empty-state { text-align: center; padding: 60px 0; color: var(--text-dim); }
+.empty-state .icon { font-size: 40px; margin-bottom: 12px; }
+
+/* ── Two-col layout ── */
+.two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
+
+/* ── Project card ── */
+.project-card {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 16px;
+}
+.project-card h3 { font-size: 13px; font-weight: 700; margin-bottom: 10px; }
+.info-row { display: flex; justify-content: space-between; align-items: center;
+            padding: 4px 0; border-bottom: 1px solid var(--border); font-size: 12px; }
+.info-row:last-child { border-bottom: none; }
+.info-key { color: var(--text-dim); }
+.info-val { font-weight: 600; font-family: monospace; }
+
+/* ── Scrollbar ── */
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--text-dim); }

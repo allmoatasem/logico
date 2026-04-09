@@ -273,6 +273,19 @@ def cmd_sync(args: list[str]) -> None:
     print("\nSync complete.")
 
 
+def cmd_serve(args: list[str]) -> None:
+    """serve [--port N] — start the local HTTP API server for the desktop app."""
+    port = 7765
+    if "--port" in args:
+        try:
+            port = int(args[args.index("--port") + 1])
+        except (IndexError, ValueError):
+            pass
+    from .server import serve
+    print(f"Logico server listening on http://127.0.0.1:{port}")
+    serve(port)
+
+
 def cmd_watch(args: list[str]) -> None:
     """watch <source> <destination> — auto-sync on every save."""
     if len(args) < 2:
@@ -311,6 +324,7 @@ def main() -> None:
         "log": cmd_log,
         "revert": cmd_revert,
         "watch": cmd_watch,
+        "serve": cmd_serve,
     }
 
     if command in dispatch:

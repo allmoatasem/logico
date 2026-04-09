@@ -12,3 +12,12 @@ venv/
 *.logicx
 *.dorico
 Project/
+
+# Electron build artifacts
+app/node_modules/
+app/dist/
+app/release/
+app/resources/logico-server/
+
+# .logico snapshot directories (next to project files)
+.logico/

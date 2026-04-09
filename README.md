@@ -8,7 +8,15 @@ Logico parses each application's proprietary file format, extracts MIDI notes, t
 
 If you compose across multiple tools — sketching in StaffPad, engraving in Dorico, producing in Logic Pro — keeping all three projects in sync currently requires manual re-entry. Logico bridges them by reading and writing the underlying file formats directly.
 
-## Installation
+## Getting the app
+
+**Musicians:** download the installer from the Releases page — no Python or terminal required.
+- macOS: `Logico-x.x.x.dmg`
+- Windows: `Logico-Setup-x.x.x.exe`
+
+The app is fully self-contained. The Python engine is bundled inside.
+
+## Developer installation (CLI)
 
 ```bash
 pip install -e .
@@ -20,6 +28,33 @@ Requires Python 3.11+.
 > ```bash
 > /opt/homebrew/bin/pip3 install -e . --break-system-packages
 > ```
+
+## Building the desktop app
+
+```bash
+# 1. Bundle Python into a self-contained binary (macOS)
+./scripts/build-backend.sh         # → app/resources/logico-server/
+
+# 1. Bundle Python (Windows, in PowerShell)
+.\scripts\build-backend.ps1
+
+# 2. Build the Electron installer
+cd app
+npm install
+npm run dist:mac    # → app/release/Logico-x.x.x.dmg
+npm run dist:win    # → app/release/Logico-Setup-x.x.x.exe
+
+# Or do everything at once on macOS:
+./scripts/build-all.sh
+```
+
+### Development mode (hot reload)
+
+```bash
+pip install -e .          # install logico CLI
+cd app && npm install
+npm run dev               # starts Vite + Electron concurrently
+```
 
 ## Usage
 
@@ -167,15 +202,21 @@ Uses `watchdog` (already a dependency) to monitor both files. On save, diffs aga
 - **Articulations** — staccato, accent, tenuto, marcato; map Dorico articulation IDs ↔ Logic note flags
 - **Instrument mapping** — `logico.toml` config for matching tracks across formats by instrument family, not just exact name; fuzzy matching and alias tables
 
-### Phase 6 — Cross-platform desktop UI (planned)
+### Phase 6 — Cross-platform desktop UI (complete)
 
-A native-feeling Electron app that wraps the Python CLI, targeting macOS, Windows, and Linux.
+A native-feeling Electron + React app targeting macOS and Windows. No Python knowledge required — the Python engine is bundled inside the installer via PyInstaller.
 
-- **Project panel** — open any `.logicx`, `.dorico`, or `.stf` file and see its tracks, notes, tempo, and key at a glance
-- **Sync view** — side-by-side diff of two projects with color-coded added/removed/changed notes before committing the sync
-- **Version timeline** — visual history of all past snapshots (Phase 3), click any point to preview or restore it
-- **Watch mode toggle** — enable/disable automatic sync on save with a single button
-- **Architecture**: Electron shell + Python sidecar process (spawned via `child_process`); the UI sends commands to the CLI via stdin/stdout or a local HTTP API, keeping all format logic in Python
+**Architecture:** Electron shell spawns a local FastAPI server (`logico serve`) on startup and communicates with it over localhost. All format logic stays in Python; the UI is pure React.
+
+**Views:**
+- **Sync** — pick source + destination, click Sync Now, see the result with note count and snapshot number
+- **History** — browse all past snapshots for any project file, diff any snapshot against the current state, restore with one click
+- **Watch** — toggle auto-sync on save; status indicator shows live watch state
+
+**Bundling:**
+- `scripts/build-backend.sh` (macOS) / `scripts/build-backend.ps1` (Windows) — PyInstaller bundles the Python runtime + all dependencies into `app/resources/logico-server/`
+- `electron-builder` packages the Electron app + the Python binary into a signed DMG (macOS) or NSIS installer (Windows)
+- In dev mode, Electron spawns `python -m logico serve` against the local source tree so no build step is needed
 
 ## How it works
 
@@ -251,27 +292,43 @@ Musical hierarchy: `kScore → flows → blocks → events`. Notes live in `kVoi
 ## Project structure
 
 ```
-src/logico/
-├── model.py              Common music data model
-├── cli.py                CLI entry point (read, diff, sync, log, revert, watch)
-├── mapping.py            Instrument/track name mapping + fuzzy alias table
-├── watcher.py            File watcher daemon (Phase 4)
-├── dorico/
-│   ├── dtn.py            DTN binary parser/serializer (legacy + modern opcodes)
-│   ├── parser.py         .dorico ZIP → DtnFile
-│   ├── extractor.py      DtnFile → Project (both format variants)
-│   └── writer.py         Project → .dorico (full read+write)
-├── staffpad/
-│   ├── parser.py         .stf SQLite parser
-│   ├── extractor.py      StfProject → Project
-│   └── writer.py         Project → .stf
-├── logic/
-│   ├── parser.py         .logicx binary parser
-│   ├── extractor.py      LogicProject → Project
-│   └── writer.py         Project → .logicx
-└── sync/
-    ├── snapshot.py       JSON snapshot save/load (Phase 3)
-    └── diff.py           Note/tempo/sig diff engine (Phase 3)
+logico/                           ← monorepo root
+├── src/logico/                   ← Python backend
+│   ├── model.py                  Common music data model
+│   ├── cli.py                    CLI (read, diff, sync, log, revert, watch, serve)
+│   ├── server.py                 FastAPI server (used by the desktop app)
+│   ├── mapping.py                Instrument/track name mapping + fuzzy alias table
+│   ├── watcher.py                File watcher daemon
+│   ├── dorico/
+│   │   ├── dtn.py                DTN binary parser/serializer (legacy + modern opcodes)
+│   │   ├── parser.py             .dorico ZIP → DtnFile
+│   │   ├── extractor.py          DtnFile → Project (both format variants)
+│   │   └── writer.py             Project → .dorico (full read+write)
+│   ├── staffpad/
+│   │   ├── parser.py, extractor.py, writer.py
+│   ├── logic/
+│   │   ├── parser.py, extractor.py, writer.py
+│   └── sync/
+│       ├── snapshot.py           JSON snapshot save/load
+│       └── diff.py               Note/tempo/sig diff engine
+├── app/                          ← Electron + React frontend
+│   ├── electron/
+│   │   ├── main.js               Main process (spawns Python, file dialogs)
+│   │   └── preload.js            Context bridge
+│   ├── src/
+│   │   ├── App.tsx               Root component + nav
+│   │   ├── api.ts                HTTP client for the Python server
+│   │   └── components/
+│   │       ├── SyncView.tsx      Sync panel
+│   │       ├── HistoryView.tsx   Snapshot browser + diff
+│   │       └── WatchView.tsx     Watch mode toggle
+│   ├── package.json              Electron + Vite + electron-builder
+│   └── resources/                PyInstaller output lands here (git-ignored)
+├── scripts/
+│   ├── build-backend.sh          PyInstaller (macOS)
+│   ├── build-backend.ps1         PyInstaller (Windows)
+│   └── build-all.sh              Full build (macOS)
+└── pyproject.toml                Python package (fastapi, uvicorn, watchdog, …)
 ```
 
 ## Safety notes

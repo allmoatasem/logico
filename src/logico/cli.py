@@ -221,7 +221,13 @@ def _write_project(project: Project, path: str) -> None:
         write_logic(project, path)
         print(f"  Written to Logic Pro: {path}")
     elif fmt == "dorico":
-        print("  Dorico writing not yet implemented (coming in next update)")
+        from .dorico.writer import write_dorico
+        try:
+            write_dorico(project, path)
+            print(f"  Written to Dorico: {path}")
+        except NotImplementedError as e:
+            print(f"  Partial write to Dorico (notes not yet supported):")
+            print(f"    {e}")
     else:
         print(f"  Writing not supported for format: {fmt}")
 

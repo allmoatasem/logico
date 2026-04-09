@@ -55,6 +55,13 @@ class DtnEntity:
     flags: int
     is_array: bool
     children: list[DtnEntity | DtnKV | None] = field(default_factory=list)
+    # Original child key list values (opaque IDs from the source file).
+    # Preserved for byte-identical round-trip serialization. When new children
+    # are added, the serializer will append default values to this list.
+    child_key_list: list[int] = field(default_factory=list)
+    # Null-child placeholder data: each None child has its own (key, value) pair
+    # consumed from the FD opcode. Stored in order of appearance.
+    null_child_data: list[tuple[int, int]] = field(default_factory=list)
 
     def key(self, keys: list[str]) -> str:
         return keys[self.key_idx] if self.key_idx < len(keys) else f"?{self.key_idx}"
@@ -99,6 +106,9 @@ class DtnFile:
     keys: list[str]
     values: list[str]
     root: DtnEntity
+    # Wrapper entity that precedes the root in the binary.
+    # Captured byte-for-byte so it can be reproduced on serialization.
+    wrapper_bytes: bytes = b""
 
     def dump(self, max_depth: int = 3) -> str:
         """Return a human-readable dump of the entity tree."""
@@ -145,8 +155,14 @@ def read_varint(data: bytes, pos: int) -> tuple[int, int]:
     return result, pos
 
 
-def _parse_children(data: bytes, pos: int, num_children: int) -> tuple[list[DtnEntity | DtnKV | None], int]:
-    """Parse num_children child nodes starting at pos."""
+def _parse_children(
+    data: bytes, pos: int, num_children: int, null_data: list[tuple[int, int]]
+) -> tuple[list[DtnEntity | DtnKV | None], int]:
+    """Parse num_children child nodes starting at pos.
+
+    null_data is appended to with (key, value) pairs from each FD encountered,
+    in order, so the serializer can reproduce them.
+    """
     children: list[DtnEntity | DtnKV | None] = []
     for _ in range(num_children):
         if pos >= len(data):
@@ -162,9 +178,10 @@ def _parse_children(data: bytes, pos: int, num_children: int) -> tuple[list[DtnE
             children.append(entity)
         elif opcode == OP_NULL:
             pos += 1
-            # FD has key + value varints (placeholder)
-            _, pos = read_varint(data, pos)
-            _, pos = read_varint(data, pos)
+            # FD has key + value varints (placeholder for missing data)
+            null_key, pos = read_varint(data, pos)
+            null_val, pos = read_varint(data, pos)
+            null_data.append((null_key, null_val))
             children.append(None)
         else:
             raise ValueError(
@@ -182,18 +199,23 @@ def _parse_entity(data: bytes, pos: int) -> tuple[DtnEntity, int]:
     flags, pos = read_varint(data, pos)
     num_children, pos = read_varint(data, pos)
 
-    # Skip child key list (opaque IDs, not used for navigation)
+    # Read the child key list (opaque IDs — preserved for round-trip)
+    child_key_list: list[int] = []
     for _ in range(num_children):
-        _, pos = read_varint(data, pos)
+        ck, pos = read_varint(data, pos)
+        child_key_list.append(ck)
 
     # Parse children by opcode
-    children, pos = _parse_children(data, pos, num_children)
+    null_data: list[tuple[int, int]] = []
+    children, pos = _parse_children(data, pos, num_children, null_data)
 
     return DtnEntity(
         key_idx=key_idx,
         flags=flags,
         is_array=is_array,
         children=children,
+        child_key_list=child_key_list,
+        null_child_data=null_data,
     ), pos
 
 
@@ -226,16 +248,20 @@ def parse_dtn(data: bytes) -> DtnFile:
     if pos >= len(data) or data[pos] != OP_ENTITY:
         raise ValueError(f"Expected FE opcode at tree start (0x{pos:x})")
 
-    # Skip wrapper header: FE + key + flags + num_children(=0) varints
+    wrapper_start = pos
+
+    # Read wrapper header: FE + key + flags + num_children varints
     pos += 1
     _, pos = read_varint(data, pos)  # wrapper key
     _, pos = read_varint(data, pos)  # wrapper flags/version
     wrapper_children, pos = read_varint(data, pos)  # usually 0
 
-    # If wrapper claims 0 children, the root entity follows directly
-    # If it claims children, skip its child key list
+    # If wrapper claims children, skip its child key list
     for _ in range(wrapper_children):
         _, pos = read_varint(data, pos)
+
+    # Capture wrapper bytes for byte-identical round-trip
+    wrapper_bytes = data[wrapper_start:pos]
 
     # Parse root entity (kScore)
     if data[pos] != OP_ENTITY:
@@ -249,6 +275,7 @@ def parse_dtn(data: bytes) -> DtnFile:
         keys=keys,
         values=values,
         root=root,
+        wrapper_bytes=wrapper_bytes,
     )
 
 
@@ -257,3 +284,92 @@ def parse_dtn_file(path: str) -> DtnFile:
     with open(path, "rb") as f:
         data = f.read()
     return parse_dtn(data)
+
+
+# --- Serialization ---
+
+
+def write_varint(value: int) -> bytes:
+    """Encode an unsigned integer as LEB128 varint."""
+    if value < 0:
+        raise ValueError(f"Cannot encode negative varint: {value}")
+    out = bytearray()
+    while True:
+        byte = value & 0x7F
+        value >>= 7
+        if value:
+            out.append(byte | 0x80)
+        else:
+            out.append(byte)
+            break
+    return bytes(out)
+
+
+def _serialize_entity(entity: DtnEntity, out: bytearray) -> None:
+    """Serialize an entity and its children into out."""
+    out.append(OP_ARRAY if entity.is_array else OP_ENTITY)
+    out.extend(write_varint(entity.key_idx))
+    out.extend(write_varint(entity.flags))
+    out.extend(write_varint(len(entity.children)))
+
+    # Child key list — must have one entry per child.
+    # Pad with 0 if the list is shorter than children (e.g., new children added).
+    ckl = list(entity.child_key_list)
+    while len(ckl) < len(entity.children):
+        ckl.append(0)
+    for ck in ckl[: len(entity.children)]:
+        out.extend(write_varint(ck))
+
+    # Serialize each child by opcode
+    null_idx = 0
+    for child in entity.children:
+        if isinstance(child, DtnKV):
+            out.append(OP_KV)
+            out.extend(write_varint(child.key_idx))
+            out.extend(write_varint(child.value_idx))
+        elif isinstance(child, DtnEntity):
+            _serialize_entity(child, out)
+        elif child is None:
+            out.append(OP_NULL)
+            if null_idx < len(entity.null_child_data):
+                nk, nv = entity.null_child_data[null_idx]
+                null_idx += 1
+            else:
+                nk, nv = 0, 0
+            out.extend(write_varint(nk))
+            out.extend(write_varint(nv))
+        else:
+            raise ValueError(f"Unknown child type: {type(child)}")
+
+
+def serialize_dtn(dtn: DtnFile) -> bytes:
+    """Serialize a DtnFile back to its binary form."""
+    out = bytearray()
+
+    # File header: version, type, key_count
+    out.extend(struct.pack("<III", dtn.version, dtn.file_type, len(dtn.keys)))
+
+    # Key string table (null-terminated UTF-8)
+    for key in dtn.keys:
+        out.extend(key.encode("utf-8"))
+        out.append(0)
+
+    # Value string table: count then strings
+    out.extend(struct.pack("<I", len(dtn.values)))
+    for value in dtn.values:
+        out.extend(value.encode("utf-8"))
+        out.append(0)
+
+    # Wrapper entity bytes (preserved verbatim)
+    out.extend(dtn.wrapper_bytes)
+
+    # Root entity tree
+    _serialize_entity(dtn.root, out)
+
+    return bytes(out)
+
+
+def write_dtn_file(dtn: DtnFile, path: str) -> None:
+    """Write a DtnFile to disk."""
+    with open(path, "wb") as f:
+        f.write(serialize_dtn(dtn))

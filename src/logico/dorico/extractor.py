@@ -224,15 +224,14 @@ def _extract_voice_events(
     """Extract note events from a voice stream block."""
     k, v = s.keys, s.values
 
+    # In Dorico, the block has an `events` array directly (it IS an array entity).
+    # An empty voice block has a (null) child instead.
     events = block.get_entity("events", k)
     if not events:
         return
 
-    ev_arr = events.get_entity("array", k)
-    if not ev_arr:
-        return
-
-    for ev in ev_arr.children:
+    # Iterate the array children directly
+    for ev in events.children:
         if not isinstance(ev, DtnEntity):
             continue
 
